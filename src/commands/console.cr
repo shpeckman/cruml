@@ -1,14 +1,11 @@
 # src/commands/console.cr
 
-require "yaml"
 require "tallboy"
 require "option_parser"
-require "./../transformer"
-require "./../renders/diagram_render"
 require "./../renders/config"
 require "./runner"
 
-files = [] of String
+cli_paths = [] of String
 target_dir = "out/"
 
 OptionParser.parse do |parser|
@@ -41,14 +38,8 @@ OptionParser.parse do |parser|
       Cruml::Renders::Config.no_color = true
     end
 
-    parser.on "--path=PATH", "Path to specify" do |path|
-      if File.file?(path) && path.ends_with?(".cr")
-        files << path
-      end
-
-      if File.directory?(path)
-        files |= Dir.glob("#{path}/**/*.cr")
-      end
+    parser.on "--path=PATH", "Path to analyze (repeatable, overrides the paths of .cruml.yml)" do |path|
+      cli_paths << path
     end
 
     parser.on "--output-dir=DIR", "Directory path to save diagrams" do |dir|
@@ -75,24 +66,25 @@ end
 
 config_file = Cruml::Renders::Config.ensure_config_file!
 
-File.open(config_file) do |file|
-  if paths = YAML.parse(file)["paths"]?
-    paths.as_a.each do |path|
-      if File.file?(path.as_s) && path.as_s.ends_with?(".cr")
-        files << path.as_s
-      end
-
-      if File.directory?(path.as_s)
-        files |= Dir.glob("#{path.as_s}/**/*.cr")
-      end
-    end
-  end
-end
-
-if files.size == 0
-  puts "No crystal files are present in the path, please retry.".colorize(:red)
+begin
+  Cruml::Renders::Config.load(config_file)
+rescue error : YAML::ParseException
+  STDERR.puts "Invalid configuration file #{config_file} : #{error.message}".colorize(:red)
   exit 1
 end
 
-Cruml::Runner.new(files, target_dir, Cruml::Renders::Config.verbose?).run
+# Paths given on the command line take precedence over the ones of the configuration file.
+paths = cli_paths.empty? ? Cruml::Renders::Config.file.paths : cli_paths
+files = [] of String
 
+paths.each do |path|
+  if File.file?(path) && path.ends_with?(".cr")
+    files << path
+  elsif File.directory?(path)
+    files.concat(Dir.glob("#{path}/**/*.cr").sort!)
+  else
+    STDERR.puts "Ignoring #{path} : not a Crystal file or a directory.".colorize(:yellow)
+  end
+end
+
+Cruml::Runner.new(files.uniq, target_dir, Cruml::Renders::Config.verbose?).run
