@@ -1,23 +1,34 @@
-# This consists of obtaining information about methods.
+# src/entities/method_info.cr
+
 class Cruml::Entities::MethodInfo
-  # Method visibility (- private, # protected and + public).
+  ESCAPE_PATTERNS = {
+    '|' => "\\|",
+    ':' => "\\:",
+    '.' => "\\.",
+    '{' => "\\{",
+    '}' => "\\}",
+    '<' => "\\<",
+    '>' => "\\>",
+    '[' => "\\[",
+    ']' => "\\]",
+    '"' => "\\\"",
+    '\'' => "\\'",
+  }
+
   getter visibility : Symbol
-
-  # Method name.
   getter name : String
-
-  # Return type of a method.
   getter return_type : String
-
-  # All arguments in a method.
   getter args = [] of Cruml::Entities::ArgInfo
 
-  def initialize(@visibility : Symbol, @name : String, @return_type : String)
-    @name = escape_characters(@name)
+  def self.escape(input : String) : String
+    input.gsub(ESCAPE_PATTERNS)
   end
 
-  # Add an argument into the args list.
-  def add_arg(arg : Cruml::Entities::ArgInfo)
+  def initialize(@visibility : Symbol, @name : String, @return_type : String)
+    @name = self.class.escape(@name)
+  end
+
+  def add_arg(arg : Cruml::Entities::ArgInfo) : Nil
     @args << arg
 
     if Cruml::Renders::Config.verbose?
@@ -25,30 +36,13 @@ class Cruml::Entities::MethodInfo
     end
   end
 
-  # Escape some special characters to avoid syntax errors during diagram
-  # compilation of d2.
-  private def escape_characters(input : String) : String
-    patterns = {
-      '|' => "\\|",
-      ':' => "\\:",
-      '.' => "\\.",
-      '{' => "\\{",
-      '}' => "\\}",
-      '<' => "\\<",
-      '[' => "\\[",
-      ']' => "\\]",
-    }
-
-    input.gsub(patterns)
-  end
-
-  # Generate the args.
   def generate_args : String
     String.build do |str|
       @args.each_with_index do |arg, index|
-        str << arg.name << " \\: " << escape_characters(arg.type)
+        str << arg.name << " \\: " << self.class.escape(arg.type)
         str << ", " if index != @args.size - 1
       end
     end
   end
 end
+

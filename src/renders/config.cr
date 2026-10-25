@@ -1,17 +1,73 @@
+# src/renders/config.cr
+
 require "yaml"
 
-# Stores the diagram configuration.
 class Cruml::Renders::Config
-  # The theme of the diagram (`:light` or `:dark`).
   class_property theme = :light
-
-  # Whether to disable colors in the diagram.
   class_property? no_color = false
-
-  # Enable the verbose mode
   class_property? verbose = false
 
-  # Gets the color for classes.
+  def self.config_path : String
+    File.join(Dir.current, ".cruml.yml")
+  end
+
+  def self.default_yaml : String
+    YAML.build do |yml|
+      yml.mapping do
+        yml.scalar "colors"
+        yml.mapping do
+          yml.scalar "light"
+          yml.mapping do
+            yml.scalar "classes"
+            yml.scalar "#baa7e5"
+            yml.scalar "abstract_classes"
+            yml.scalar "#a7e5a7"
+            yml.scalar "interfaces"
+            yml.scalar "#e2c7a3"
+            yml.scalar "modules"
+            yml.scalar "#5ab3f4"
+          end
+
+          yml.scalar "dark"
+          yml.mapping do
+            yml.scalar "classes"
+            yml.scalar "#2e1065"
+            yml.scalar "abstract_classes"
+            yml.scalar "#365314"
+            yml.scalar "interfaces"
+            yml.scalar "#af6300"
+            yml.scalar "modules"
+            yml.scalar "#0041cc"
+          end
+        end
+
+        yml.scalar "paths"
+        yml.sequence do
+          yml.scalar "src/"
+        end
+
+        yml.scalar "namespaces"
+        yml.mapping do
+          yml.scalar "Namespace"
+          yml.sequence do
+            yml.scalar "ClassOne"
+            yml.scalar "ClassTwo"
+            yml.scalar "ClassThree"
+          end
+        end
+      end
+    end
+  end
+
+  def self.generate_config_file(path : String = config_path) : Nil
+    File.write(path, default_yaml)
+  end
+
+  def self.ensure_config_file!(path : String = config_path) : String
+    generate_config_file(path) unless File.exists?(path)
+    path
+  end
+
   def self.class_color : String
     customized_color = color_theme_from_yaml("classes")
 
@@ -22,7 +78,6 @@ class Cruml::Renders::Config
     end
   end
 
-  # Gets the color for abstract classes.
   def self.abstract_color : String
     customized_color = color_theme_from_yaml("abstract_classes")
 
@@ -33,7 +88,6 @@ class Cruml::Renders::Config
     end
   end
 
-  # Gets the color for interfaces.
   def self.interface_color : String
     customized_color = color_theme_from_yaml("interfaces")
 
@@ -44,7 +98,6 @@ class Cruml::Renders::Config
     end
   end
 
-  # Gets the color for modules.
   def self.module_color : String
     customized_color = color_theme_from_yaml("modules")
 
@@ -55,28 +108,30 @@ class Cruml::Renders::Config
     end
   end
 
-  # Gets the theme color.
   def self.theme_color : String
     (@@theme == :light) ? "#dedede" : "#212121"
   end
 
-  # Gets the text color.
   def self.text_color : String
     (@@theme == :light) ? "#000000" : "#ffffff"
   end
 
-  # Retrieve the color from the YAML file.
   def self.color_theme_from_yaml(type : String) : String?
-    File.open(Dir.current + "/.cruml.yml") do |file|
-      colors = YAML.parse(file)["colors"]?
+    path = ensure_config_file!
 
-      if colors
-        colors.as_h[@@theme.to_s][type].as_s
+    File.open(path) do |file|
+      if colors = YAML.parse(file)["colors"]?
+        if theme_colors = colors[@@theme.to_s]?
+          if color = theme_colors[type]?
+            return color.as_s
+          end
+        end
       end
     end
+
+    nil
   end
 
-  # Generates the class definitions for the diagram.
   def self.class_def_colors : String
     String.build do |io|
       [
@@ -95,3 +150,4 @@ class Cruml::Renders::Config
     end
   end
 end
+
