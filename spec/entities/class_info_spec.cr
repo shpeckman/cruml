@@ -1,4 +1,4 @@
-require "spec"
+require "../spec_helper"
 
 describe Cruml::Entities::ClassInfo do
   it "initializes with name and type" do
@@ -6,7 +6,8 @@ describe Cruml::Entities::ClassInfo do
     class_info.name.should eq("Person")
     class_info.type.should eq(:class)
     class_info.instance_vars.should be_empty
-    class_info.parent_classes.should be_empty
+    class_info.superclass.should be_nil
+    class_info.struct?.should be_false
     class_info.methods.should be_empty
   end
 
@@ -23,14 +24,25 @@ describe Cruml::Entities::ClassInfo do
     class_info.instance_vars.should eq([{"first_name", "Int32"}])
   end
 
-  it "adds a parent class" do
-    Cruml::ClassList.add(Cruml::Entities::ClassInfo.new("Person", :class))
+  it "initializes a struct" do
+    class_info = Cruml::Entities::ClassInfo.new("Point", :class, :struct)
+    class_info.struct?.should be_true
+    class_info.kind_label.should eq("struct")
+  end
 
+  it "sets the superclass" do
     class_info = Cruml::Entities::ClassInfo.new("Employee", :class)
-    class_info.add_parent_class("Person")
+    class_info.superclass = "Person"
+    class_info.superclass.should eq("Person")
+  end
 
-    Cruml::ClassList.add(class_info)
-    class_info.parent_classes.should eq([{"Person", "Employee", :class}])
+  it "adds included and extended modules once" do
+    class_info = Cruml::Entities::ClassInfo.new("Person", :class)
+    class_info.add_included_module("Greeter")
+    class_info.add_included_module("Greeter")
+    class_info.add_extended_module("Loggable")
+    class_info.included_modules.should eq(["Greeter"])
+    class_info.extended_modules.should eq(["Loggable"])
   end
 
   it "adds a method" do
@@ -49,6 +61,4 @@ describe Cruml::Entities::ClassInfo do
     class_info.add_method(initialize_method)
     class_info.methods.should eq([initialize_method, is_major_method])
   end
-
-  after_each { Cruml::ClassList.clear }
 end
