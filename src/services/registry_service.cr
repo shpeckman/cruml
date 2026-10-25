@@ -1,17 +1,15 @@
+# src/services/registry_service.cr
+
 require "yaml"
 require "../entities/class_info"
 require "../entities/module_info"
 
-# Service to manage the collection of classes and modules
-# This replaces the global class_getter pattern with a proper service
 class Cruml::Services::RegistryService
-  # Array of classes
   getter classes = [] of Cruml::Entities::ClassInfo
-
-  # Array of modules
   getter modules = [] of Cruml::Entities::ModuleInfo
 
   def add_class(class_info : Cruml::Entities::ClassInfo) : Nil
+    return if find_class(class_info.name)
     @classes << class_info
   end
 
@@ -24,6 +22,7 @@ class Cruml::Services::RegistryService
   end
 
   def add_module(module_info : Cruml::Entities::ModuleInfo) : Nil
+    return if find_module(module_info.name)
     @modules << module_info
   end
 
@@ -40,7 +39,6 @@ class Cruml::Services::RegistryService
     @modules.clear
   end
 
-  # Groups classes by their namespaces defined in the YML config
   def group_classes_by_namespaces(test_mode : Bool = false) : Hash(String, Array(Cruml::Entities::ClassInfo))
     output = {} of String => Array(Cruml::Entities::ClassInfo)
 
@@ -62,13 +60,10 @@ class Cruml::Services::RegistryService
           classes.as_a.each do |klass|
             if found_class = find_class(klass.as_s)
               classes_info << found_class
-
-              # Remove classes that are in the YML config from the main array
               @classes.reject! { |kls| kls.name == klass.as_s }
             end
           end
 
-          # Only add namespace if it has classes
           unless classes_info.empty?
             output[key.as_s] = classes_info
           end
@@ -79,7 +74,6 @@ class Cruml::Services::RegistryService
     output
   end
 
-  # Groups modules by their namespaces defined in the YML config.
   def group_modules_by_namespaces(test_mode : Bool = false) : Hash(String, Array(Cruml::Entities::ModuleInfo))
     output = {} of String => Array(Cruml::Entities::ModuleInfo)
 
@@ -101,13 +95,10 @@ class Cruml::Services::RegistryService
           items.as_a.each do |item|
             if found_module = find_module(item.as_s)
               modules_info << found_module
-
-              # Remove modules that are in the YML config from the main array
               @modules.reject! { |mod| mod.name == item.as_s }
             end
           end
 
-          # Only add namespace if it has modules
           output[key.as_s] = modules_info unless modules_info.empty?
         end
       end
@@ -116,23 +107,18 @@ class Cruml::Services::RegistryService
     output
   end
 
-  # Removes duplicated instance variables from child classes
-  # that are already defined in parent classes
   def remove_duplicate_instance_vars : Nil
-    # Get classes with parents, sorted by inheritance depth
     classes_with_parents = @classes.select { |klass| !klass.parent_classes.empty? }
       .sort_by!(&.parent_classes.size)
 
     classes_with_parents.reverse_each do |klass|
       klass.parent_classes.each do |parent_name, _, _|
-        # Use find_class instead of find_class! to handle cases where parent might not be found
         if parent = find_class(parent_name)
           parent_ivars = parent.instance_vars
-
-          # Remove instance variables that exist in parent
           klass.instance_vars.reject! { |ivar| parent_ivars.includes?(ivar) }
         end
       end
     end
   end
 end
+
