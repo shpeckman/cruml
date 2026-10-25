@@ -113,11 +113,7 @@ module Cruml::Renders::UML
   end
 
   private def add_type(enum_info : Cruml::Entities::EnumInfo) : Nil
-    add_enum(enum_info.name) do
-      if base_type = enum_info.base_type
-        @code << INDENT << "\\: " << Cruml::Entities::MethodInfo.escape(base_type) << "\n"
-      end
-
+    add_enum(enum_info.name, enum_info.base_type) do
       enum_info.constants.each do |name, value|
         key = D2_RESERVED_KEYWORDS.includes?(name.downcase) ? quote(" #{name}") : name
         @code << INDENT << key

@@ -1,13 +1,14 @@
 # Classifiers consists to add classes, structs, abstract classes, interfaces, modules, enums,
 # annotations, aliases and namespaces into the class diagram.
 module Cruml::Renders::Classifier
-  # Adds an object into the class diagram, with an optional UML stereotype (`«struct»`, ...).
-  private def add_object(name : String, color : String, stereotype : String? = nil, &) : Nil
+  # Adds an object into the class diagram, with an optional UML stereotype (`«struct»`, ...)
+  # and text appended to its title.
+  private def add_object(name : String, color : String, stereotype : String? = nil, suffix : String? = nil, &) : Nil
     @code << quote(name) << " {" << "\n"
     @code << Cruml::Renders::UML::INDENT << "shape: class" << "\n"
 
     if stereotype
-      @code << Cruml::Renders::UML::INDENT << "label: " << quote("«#{stereotype}» #{name}") << "\n"
+      @code << Cruml::Renders::UML::INDENT << "label: " << quote("«#{stereotype}» #{name}#{suffix}") << "\n"
     end
 
     unless Cruml::Renders::Config.no_color?
@@ -62,9 +63,9 @@ module Cruml::Renders::Classifier
     end
   end
 
-  # Adds an enum into the class diagram.
-  private def add_enum(name : String, &) : Nil
-    add_object(name, Cruml::Renders::Config.enum_color, "enum") do
+  # Adds an enum into the class diagram, with its base type (e.g. `UInt8`) if any.
+  private def add_enum(name : String, base_type : String? = nil, &) : Nil
+    add_object(name, Cruml::Renders::Config.enum_color, "enum", base_type.try { |type| " : #{type}" }) do
       yield
     end
   end
