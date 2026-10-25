@@ -1,400 +1,249 @@
-# src/transformer.cr
+# src/visitor.cr
 
 require "compiler/crystal/syntax"
 require "./services/registry_service"
 require "./parsers/*"
 require "./entities/*"
 
-class Cruml::Transformer < Crystal::Transformer
-  include Cruml::Parsers::RegexPatterns
-
+# Walks the AST of a Crystal file and records the types it declares into the registry.
+#
+# References to other types (superclasses, mixins, alias targets) are stored as written;
+# `RegistryService#resolve_references` qualifies them once every file has been visited.
+class Cruml::Visitor < Crystal::Visitor
   getter registry : Cruml::Services::RegistryService
 
-  @current_class_name : String
-  @current_module_name : String
-  @variables : Array(Crystal::TypeDeclaration)
-  @protected_and_private_methods : Array(Crystal::Def)
-  @module_stack : Array(String)
+  # Fully qualified names of the enclosing namespaces, innermost last.
+  @scopes = [] of String
 
-  def initialize(@registry : Cruml::Services::RegistryService)
-    @current_class_name = ""
-    @current_module_name = ""
-    @module_stack = [] of String
-    @variables = [] of Crystal::TypeDeclaration
-    @protected_and_private_methods = [] of Crystal::Def
+  # Type receiving the members being visited.
+  @owner : Cruml::Entities::Members?
+
+  # Method whose body is being visited.
+  @current_def : Crystal::Def?
+
+  def initialize(@registry : Cruml::Services::RegistryService); end
+
+  def visit(node : Crystal::ASTNode) : Bool
+    true
   end
 
-  def transform(node : Crystal::ModuleDef) : Crystal::ASTNode
-    module_name = node.name.to_s
-    previous_class_name = @current_class_name
-    previous_variables = @variables
-    previous_methods = @protected_and_private_methods
+  def visit(node : Crystal::ModuleDef) : Bool
+    name = qualify_definition(node.name)
 
-    @module_stack << module_name
-    @current_module_name = @module_stack.join("::")
-    @current_class_name = ""
-    @variables = [] of Crystal::TypeDeclaration
-    @protected_and_private_methods = [] of Crystal::Def
+    module_info = @registry.find_module(name) || begin
+      module_type = Cruml::Parsers::ClassParser.interface?(name) ? :interface : :normal
+      Cruml::Entities::ModuleInfo.new(name, module_type).tap { |info| @registry.add_module(info) }
+    end
 
-    process_module(node)
-    result = super(node)
-
-    @module_stack.pop
-    @current_module_name = @module_stack.join("::")
-    @current_class_name = previous_class_name
-    @variables = previous_variables
-    @protected_and_private_methods = previous_methods
-
-    result
+    within(name, module_info) { node.body.accept(self) }
+    false
   end
 
-  def transform(node : Crystal::ClassDef) : Crystal::ASTNode
-    class_name = node.name.to_s
-    previous_class_name = @current_class_name
-    previous_module_name = @current_module_name
-    previous_variables = @variables
-    previous_methods = @protected_and_private_methods
+  def visit(node : Crystal::ClassDef) : Bool
+    base_name = qualify_definition(node.name)
+    name = base_name + (Cruml::Parsers::ClassParser.extract_generics(node) || "")
 
-    if !@module_stack.empty?
-      if class_name.includes?("::")
-        name_parts = class_name.split("::")
-        non_overlapping_start = 0
-        @module_stack.reverse_each do |mod_part|
-          if name_parts[non_overlapping_start]? == mod_part.split("::").last
-            non_overlapping_start += 1
-          else
-            break
-          end
+    class_info = @registry.find_class(name) || begin
+      class_type = Cruml::Parsers::ClassParser.determine_class_type(name, node)
+      kind = node.struct? ? :struct : :class
+      Cruml::Entities::ClassInfo.new(name, class_type, kind).tap { |info| @registry.add_class(info) }
+    end
+
+    if superclass = node.superclass.try { |parent| Cruml::Parsers::ClassParser.reference_name(parent) }
+      class_info.superclass = superclass unless class_info.superclass
+    end
+
+    within(base_name, class_info) { node.body.accept(self) }
+    false
+  end
+
+  def visit(node : Crystal::EnumDef) : Bool
+    name = qualify_definition(node.name)
+
+    enum_info = @registry.find_enum(name) || begin
+      Cruml::Entities::EnumInfo.new(name, node.base_type.try(&.to_s)).tap { |info| @registry.add_enum(info) }
+    end
+
+    within(name, enum_info) do
+      node.members.each do |member|
+        if member.is_a?(Crystal::Arg)
+          enum_info.add_constant(member.name, member.default_value.try(&.to_s))
+        else
+          member.accept(self)
         end
-        remaining_parts = name_parts[non_overlapping_start..]
-        @current_class_name = (@module_stack + remaining_parts).join("::")
-      else
-        @current_class_name = (@module_stack + [class_name]).join("::")
       end
+    end
+
+    false
+  end
+
+  def visit(node : Crystal::AnnotationDef) : Bool
+    @registry.add_annotation(Cruml::Entities::AnnotationInfo.new(qualify_definition(node.name)))
+    false
+  end
+
+  def visit(node : Crystal::Alias) : Bool
+    @registry.add_alias(Cruml::Entities::AliasInfo.new(qualify_definition(node.name), node.value.to_s))
+    false
+  end
+
+  def visit(node : Crystal::Include) : Bool
+    if name = Cruml::Parsers::ClassParser.reference_name(node.name)
+      @owner.try &.add_included_module(name)
+    end
+
+    false
+  end
+
+  def visit(node : Crystal::Extend) : Bool
+    if name = Cruml::Parsers::ClassParser.reference_name(node.name)
+      @owner.try &.add_extended_module(name)
+    end
+
+    false
+  end
+
+  def visit(node : Crystal::VisibilityModifier) : Bool
+    visibility = Cruml::Parsers::MethodParser.visibility_from_modifier(node.modifier)
+
+    case exp = node.exp
+    when Crystal::Def  then process_def(exp, visibility)
+    when Crystal::Call then process_accessors(exp, visibility)
+    else                    exp.accept(self)
+    end
+
+    false
+  end
+
+  def visit(node : Crystal::Def) : Bool
+    process_def(node, Cruml::Parsers::MethodParser.determine_visibility(node.name))
+    false
+  end
+
+  def visit(node : Crystal::Call) : Bool
+    # Calls inside a method body may contain blocks assigning instance variables.
+    return true if @current_def
+
+    process_accessors(node, :public)
+    false
+  end
+
+  def visit(node : Crystal::TypeDeclaration) : Bool
+    return false unless owner = @owner
+
+    case var = node.var
+    when Crystal::InstanceVar then owner.add_instance_var(var.name, node.declared_type.to_s)
+    when Crystal::ClassVar    then owner.add_class_var(var.name, node.declared_type.to_s)
+    end
+
+    false
+  end
+
+  def visit(node : Crystal::Assign) : Bool
+    return true unless (owner = @owner) && (current_def = @current_def)
+    return true unless (target = node.target).is_a?(Crystal::InstanceVar)
+    return true if owner.instance_var?(target.name)
+
+    if type = assigned_type(node.value, current_def)
+      owner.add_instance_var(target.name, type)
+    end
+
+    true
+  end
+
+  def visit(node : Crystal::Macro | Crystal::LibDef) : Bool
+    false
+  end
+
+  # Visits a type body with the given namespace and owner, then restores the previous ones.
+  private def within(scope : String, owner : Cruml::Entities::Members, &) : Nil
+    previous_owner = @owner
+    @scopes << scope
+    @owner = owner
+
+    yield
+  ensure
+    @scopes.pop
+    @owner = previous_owner
+  end
+
+  # Returns the fully qualified name of a type defined in the current namespace.
+  #
+  # A path starting with the name of an enclosing namespace (`Cruml::Foo` inside `module Cruml`)
+  # is anchored on it instead of being nested once more.
+  private def qualify_definition(path : Crystal::Path) : String
+    names = path.names
+    return names.join("::") if path.global?
+
+    scope_parts = (@scopes.last? || "").split("::").reject(&.empty?)
+
+    if names.size > 1 && (anchor = scope_parts.rindex(names.first))
+      (scope_parts[0, anchor] + names).join("::")
     else
-      @current_class_name = class_name
-    end
-
-    @current_module_name = ""
-    @variables = [] of Crystal::TypeDeclaration
-    @protected_and_private_methods = [] of Crystal::Def
-
-    @module_stack << class_name
-    process_class(node)
-    result = super(node)
-    @module_stack.pop
-
-    @current_class_name = previous_class_name
-    @current_module_name = previous_module_name
-    @variables = previous_variables
-    @protected_and_private_methods = previous_methods
-
-    result
-  end
-
-  def transform(node : Crystal::VisibilityModifier) : Crystal::ASTNode
-    if method = node.exp.as?(Crystal::Def)
-      @protected_and_private_methods << method
-      add_method_with_visibility(node.modifier, method)
-    end
-
-    super(node)
-  end
-
-  def transform(node : Crystal::Expressions) : Crystal::ASTNode
-    node.expressions.each do |exp|
-      process_instance_attribute(exp)
-    end
-
-    super(node)
-  end
-
-  def transform(node : Crystal::InstanceVar) : Crystal::ASTNode
-    process_instance_var_node(node)
-    super(node)
-  end
-
-  def transform(node : Crystal::Assign) : Crystal::ASTNode
-    process_assign_node(node)
-    super(node)
-  end
-
-  def transform(node : Crystal::TypeDeclaration) : Crystal::ASTNode
-    if node.var.is_a?(Crystal::InstanceVar) || node.var.is_a?(Crystal::ClassVar)
-      @variables |= [node]
-    end
-
-    if node.var.is_a?(Crystal::ClassVar)
-      process_class_var_declaration(node)
-    end
-
-    super(node)
-  end
-
-  def transform(node : Crystal::Def) : Crystal::ASTNode
-    process_def_node(node)
-    super(node)
-  end
-
-  private def process_module(node : Crystal::ModuleDef) : Nil
-    return if @registry.find_module(@current_module_name)
-
-    module_type = Cruml::Parsers::ClassParser.interface?(@current_module_name) ? :interface : :normal
-    module_info = Cruml::Entities::ModuleInfo.new(@current_module_name, module_type)
-    @registry.add_module(module_info)
-  end
-
-  private def process_class(node : Crystal::ClassDef) : Nil
-    if generics = Cruml::Parsers::ClassParser.extract_generics(node)
-      @current_class_name += generics
-    end
-
-    class_type = Cruml::Parsers::ClassParser.determine_class_type(@current_class_name, node)
-    class_info = @registry.find_class(@current_class_name)
-
-    unless class_info
-      class_info = Cruml::Entities::ClassInfo.new(@current_class_name, class_type)
-      @registry.add_class(class_info)
-    end
-
-    if node.superclass
-      parent_name = node.superclass.to_s
-      qualified_parent_name = qualify_name(parent_name)
-
-      parent_class = @registry.find_class(qualified_parent_name) || @registry.find_class(parent_name)
-      parent_type = parent_class ? parent_class.type : :class
-      final_parent_name = parent_class ? parent_class.name : qualified_parent_name
-
-      unless class_info.parent_classes.any? { |parent, _, _| parent == final_parent_name }
-        class_info.add_parent_class(final_parent_name, parent_type)
-      end
-    end
-
-    process_includes(node)
-    process_extends(node)
-    process_class_vars(node)
-  end
-
-  private def process_includes(node : Crystal::ClassDef) : Nil
-    includes = Cruml::Parsers::ClassParser.parse_includes(node.body.to_s)
-
-    if found_class = @registry.find_class(@current_class_name)
-      includes.each do |mod|
-        qualified_mod = qualify_name(mod)
-
-        target_mod = if @registry.find_module(qualified_mod) || @registry.find_module(mod)
-                       qualified_mod
-                     else
-                       mod
-                     end
-
-        found_class.add_included_module(target_mod) unless found_class.included_modules.includes?(target_mod)
-      end
+      (scope_parts + names).join("::")
     end
   end
 
-  private def process_extends(node : Crystal::ClassDef) : Nil
-    extends = Cruml::Parsers::ClassParser.parse_extends(node.body.to_s)
+  private def process_def(node : Crystal::Def, visibility : Symbol) : Nil
+    return unless owner = @owner
 
-    if found_class = @registry.find_class(@current_class_name)
-      extends.each do |mod|
-        qualified_mod = qualify_name(mod)
-
-        target_mod = if @registry.find_module(qualified_mod) || @registry.find_module(mod)
-                       qualified_mod
-                     else
-                       mod
-                     end
-
-        found_class.add_extended_module(target_mod) unless found_class.extended_modules.includes?(target_mod)
-      end
-    end
-  end
-
-  private def process_class_vars(node : Crystal::ClassDef) : Nil
-    return unless class_var = Cruml::Parsers::VariableParser.parse_class_attribute(node.body.to_s)
-
-    found_class = @registry.find_class(@current_class_name)
-    return unless found_class
-
-    found_class.add_class_var("@@#{class_var[:name]}", class_var[:type])
-
-    if VisibilityHelpers.has_class_getter?(class_var[:visibility])
-      method = Cruml::Entities::MethodInfo.new(:public, class_var[:name], class_var[:type])
-      found_class.add_method(method)
-    end
-
-    if VisibilityHelpers.has_class_setter?(class_var[:visibility])
-      method = Cruml::Entities::MethodInfo.new(:public, "#{class_var[:name]}=", class_var[:type])
-      found_class.add_method(method)
-    end
-  end
-
-  private def process_class_var_declaration(node : Crystal::TypeDeclaration) : Nil
-    return unless node.var.is_a?(Crystal::ClassVar)
-
-    var_name = node.var.as(Crystal::ClassVar).name
-    var_type = node.declared_type.to_s
-
-    if found_class = @registry.find_class(@current_class_name)
-      found_class.add_class_var(var_name, var_type)
-    end
-  end
-
-  private def add_method_with_visibility(modifier : Crystal::Visibility, method : Crystal::Def) : Nil
-    visibility = Cruml::Parsers::MethodParser.visibility_from_modifier(modifier)
-    method_name = Cruml::Parsers::MethodParser.format_method_name(method)
-    return_type = Cruml::Parsers::MethodParser.get_return_type(method)
-
-    method_info = Cruml::Entities::MethodInfo.new(visibility, method_name, return_type)
-    Cruml::Parsers::MethodParser.add_arguments(method, method_info)
-
-    if @current_module_name.empty?
-      if found_class = @registry.find_class(@current_class_name)
-        found_class.add_method(method_info)
-      end
-    else
-      if found_module = @registry.find_module(@current_module_name)
-        found_module.add_method(method_info)
-      end
-    end
-  end
-
-  private def process_instance_attribute(exp) : Nil
-    return unless attr = Cruml::Parsers::VariableParser.parse_instance_attribute(exp.to_s)
-
-    found_class = @registry.find_class(@current_class_name)
-    return unless found_class
-
-    found_class.add_instance_var("@#{attr[:name]}", attr[:type])
-
-    if VisibilityHelpers.has_getter?(attr[:visibility])
-      found_class.add_method(Cruml::Entities::MethodInfo.new(:public, attr[:name], attr[:type]))
-    end
-
-    if VisibilityHelpers.has_setter?(attr[:visibility])
-      found_class.add_method(Cruml::Entities::MethodInfo.new(:public, "#{attr[:name]}=", attr[:type]))
-    end
-  end
-
-  private def process_instance_var_node(node : Crystal::InstanceVar) : Nil
-    ivar_name = node.name.to_s
-
-    @variables.each do |variable|
-      var_name = variable.var.to_s
-      var_type = variable.declared_type.to_s
-
-      next unless var_name == ivar_name
-
-      if @current_module_name.empty?
-        if found_class = @registry.find_class(@current_class_name)
-          found_class.add_instance_var(var_name, var_type)
-        end
-      else
-        if found_module = @registry.find_module(@current_module_name)
-          found_module.add_instance_var(var_name, var_type)
-        end
-      end
-    end
-  end
-
-  private def process_assign_node(node : Crystal::Assign) : Nil
-    return unless node.target.is_a?(Crystal::InstanceVar)
-
-    target_name = node.target.to_s
-
-    @variables.each do |var|
-      if target_name == var.var.to_s
-        clean_type = var.declared_type.to_s.gsub(" ::", ' ')
-
-        if found_class = @registry.find_class(@current_class_name)
-          found_class.add_instance_var(target_name, clean_type)
-        end
-      end
-    end
-  end
-
-  private def process_def_node(node : Crystal::Def) : Nil
-    return if method_already_processed?(node)
-
-    process_constructor_assignments(node)
-    process_method_body_vars(node)
-    add_public_method(node)
-  end
-
-  private def method_already_processed?(node : Crystal::Def) : Bool
-    @protected_and_private_methods.any?(&.same?(node))
-  end
-
-  private def process_constructor_assignments(node : Crystal::Def) : Nil
-    node.args.each do |arg|
-      next unless restriction = arg.restriction
-      arg_name = arg.name.to_s
-
-      node.body.to_s.each_line do |line|
-        if ivar_name = Cruml::Parsers::VariableParser.parse_instance_var_assignment(line, arg_name)
-          if found_class = @registry.find_class(@current_class_name)
-            found_class.add_instance_var("@#{ivar_name}", restriction.to_s)
-          end
-        end
-      end
-    end
-  end
-
-  private def process_method_body_vars(node : Crystal::Def) : Nil
-    return unless var_decl = Cruml::Parsers::VariableParser.parse_instance_var_declaration(node.body.to_s)
-
-    if found_class = @registry.find_class(@current_class_name)
-      found_class.add_instance_var("@#{var_decl[:name]}", var_decl[:type])
-    end
-  end
-
-  private def add_public_method(node : Crystal::Def) : Nil
-    visibility = Cruml::Parsers::MethodParser.determine_visibility(node.name.to_s)
     method_name = Cruml::Parsers::MethodParser.format_method_name(node)
     return_type = Cruml::Parsers::MethodParser.get_return_type(node)
 
     method_info = Cruml::Entities::MethodInfo.new(visibility, method_name, return_type)
     Cruml::Parsers::MethodParser.add_arguments(node, method_info)
+    owner.add_method(method_info)
 
-    if @current_module_name.empty?
-      if found_class = @registry.find_class(@current_class_name)
-        found_class.add_method(method_info)
+    @current_def = node
+    node.body.accept(self)
+  ensure
+    @current_def = nil
+  end
+
+  private def process_accessors(node : Crystal::Call, visibility : Symbol) : Nil
+    return unless owner = @owner
+    return unless accessors = Cruml::Parsers::VariableParser.parse_accessors(node)
+
+    accessors.each do |accessor|
+      if var_type = accessor.var_type
+        if accessor.class_level
+          owner.add_class_var(accessor.var_name, var_type)
+        else
+          owner.add_instance_var(accessor.var_name, var_type)
+        end
       end
-    else
-      if found_module = @registry.find_module(@current_module_name)
-        found_module.add_method(method_info)
+
+      prefix = accessor.class_level ? "self." : ""
+      type = accessor.type || ""
+
+      if accessor.getter?
+        getter_name = accessor.predicate? ? "#{accessor.name}?" : accessor.name
+        owner.add_method(Cruml::Entities::MethodInfo.new(visibility, prefix + getter_name, type))
+
+        if accessor.nilable?
+          owner.add_method(Cruml::Entities::MethodInfo.new(visibility, "#{prefix}#{accessor.name}?", accessor.var_type || ""))
+        end
+      end
+
+      if accessor.setter?
+        setter = Cruml::Entities::MethodInfo.new(visibility, "#{prefix}#{accessor.name}=", type)
+        setter.add_arg(Cruml::Entities::ArgInfo.new("value", type)) unless type.empty?
+        owner.add_method(setter)
       end
     end
   end
 
-  private def qualify_name(name : String) : String
-    return name if @module_stack.empty?
-    return name if name.empty?
-
-    stack_parts = @module_stack.flat_map(&.split("::"))
-    name_parts = name.split("::")
-
-    if name.starts_with?(stack_parts.join("::"))
-      return name
-    end
-
-    overlap = 0
-
-    stack_parts.reverse_each do |stack_part|
-      if name_parts[overlap]? == stack_part
-        overlap += 1
-      else
-        break if overlap > 0
+  # Returns the type of a value assigned to an instance variable inside a method: the
+  # restriction (or default value) of the method argument it comes from, or the literal type.
+  private def assigned_type(value : Crystal::ASTNode, current_def : Crystal::Def) : String?
+    if value.is_a?(Crystal::Var) && (arg = current_def.args.find { |def_arg| def_arg.name == value.name })
+      if restriction = arg.restriction
+        return restriction.to_s
       end
+
+      return arg.default_value.try { |default_value| Cruml::Parsers::VariableParser.infer_type(default_value) }
     end
 
-    if overlap > 0
-      remaining_name_parts = name_parts[overlap..]
-      (stack_parts + remaining_name_parts).join("::")
-    else
-      (stack_parts + name_parts).join("::")
-    end
+    Cruml::Parsers::VariableParser.infer_type(value)
   end
 end
-
