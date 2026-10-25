@@ -69,8 +69,7 @@ describe Cruml::Services::RegistryService do
 
     # Create child class with duplicated vars
     child = Cruml::Entities::ClassInfo.new("Child", :class)
-    # Manually add parent relationship without using add_parent_class
-    child.parent_classes << {"Parent", "Child", :class}
+    child.superclass = "Parent"
     child.add_instance_var("@name", "String")
     child.add_instance_var("@age", "Int32")
     child.add_instance_var("@email", "String")
@@ -96,14 +95,14 @@ describe Cruml::Services::RegistryService do
 
     # Parent
     parent = Cruml::Entities::ClassInfo.new("Parent", :class)
-    parent.parent_classes << {"GrandParent", "Parent", :class}
+    parent.superclass = "GrandParent"
     parent.add_instance_var("@id", "Int64")
     parent.add_instance_var("@name", "String")
     registry.add_class(parent)
 
     # Child
     child = Cruml::Entities::ClassInfo.new("Child", :class)
-    child.parent_classes << {"Parent", "Child", :class}
+    child.superclass = "Parent"
     child.add_instance_var("@id", "Int64")
     child.add_instance_var("@name", "String")
     child.add_instance_var("@email", "String")
@@ -121,5 +120,61 @@ describe Cruml::Services::RegistryService do
     # Child should only have email
     child.instance_vars.size.should eq(1)
     child.instance_vars[0][0].should eq("@email")
+  end
+
+  it "adds and finds enums, annotations and aliases" do
+    registry = Cruml::Services::RegistryService.new
+    registry.add_enum(Cruml::Entities::EnumInfo.new("Color"))
+    registry.add_annotation(Cruml::Entities::AnnotationInfo.new("Serializable"))
+    registry.add_alias(Cruml::Entities::AliasInfo.new("Pair", "Tuple(Int32, Int32)"))
+
+    registry.find_enum("Color").should_not be_nil
+    registry.find_annotation("Serializable").should_not be_nil
+    registry.find_alias("Pair").should_not be_nil
+    registry.includes?("Color").should be_true
+    registry.includes?("Unknown").should be_false
+  end
+
+  it "resolves references from the innermost namespace outwards" do
+    registry = Cruml::Services::RegistryService.new
+    registry.add_class(Cruml::Entities::ClassInfo.new("App::Base", :class))
+    registry.add_class(Cruml::Entities::ClassInfo.new("Base", :class))
+    registry.add_module(Cruml::Entities::ModuleInfo.new("App::Greeter"))
+
+    child = Cruml::Entities::ClassInfo.new("App::Child", :class)
+    child.superclass = "Base"
+    child.add_included_module("Greeter")
+    child.add_extended_module("JSON::Serializable")
+    registry.add_class(child)
+
+    top_level = Cruml::Entities::ClassInfo.new("Other", :class)
+    top_level.superclass = "::Base"
+    registry.add_class(top_level)
+
+    registry.resolve_references
+
+    child.superclass.should eq("App::Base")
+    child.included_modules.should eq(["App::Greeter"])
+    child.extended_modules.should eq(["JSON::Serializable"])
+    top_level.superclass.should eq("Base")
+  end
+
+  it "resolves references to generic types" do
+    registry = Cruml::Services::RegistryService.new
+    registry.add_class(Cruml::Entities::ClassInfo.new("App::Box(T)", :class))
+
+    child = Cruml::Entities::ClassInfo.new("App::IntBox", :class)
+    child.superclass = "Box(Int32)"
+    registry.add_class(child)
+
+    registry.resolve_references
+
+    child.superclass.should eq("App::Box(T)")
+  end
+
+  it "strips generics and finds the parent scope" do
+    Cruml::Services::RegistryService.strip_generics("A(T)::B(K, Array(V))").should eq("A::B")
+    Cruml::Services::RegistryService.parent_scope("A::B(T)").should eq("A")
+    Cruml::Services::RegistryService.parent_scope("A").should eq("")
   end
 end

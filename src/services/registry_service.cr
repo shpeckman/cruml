@@ -1,12 +1,13 @@
 # src/services/registry_service.cr
 
-require "yaml"
-require "../entities/class_info"
-require "../entities/module_info"
+require "../entities/*"
 
 class Cruml::Services::RegistryService
   getter classes = [] of Cruml::Entities::ClassInfo
   getter modules = [] of Cruml::Entities::ModuleInfo
+  getter enums = [] of Cruml::Entities::EnumInfo
+  getter annotations = [] of Cruml::Entities::AnnotationInfo
+  getter aliases = [] of Cruml::Entities::AliasInfo
 
   def add_class(class_info : Cruml::Entities::ClassInfo) : Nil
     return if find_class(class_info.name)
@@ -34,91 +35,123 @@ class Cruml::Services::RegistryService
     @modules.find! { |module_info| module_name == module_info.name }
   end
 
+  def add_enum(enum_info : Cruml::Entities::EnumInfo) : Nil
+    return if find_enum(enum_info.name)
+    @enums << enum_info
+  end
+
+  def find_enum(enum_name : String) : Cruml::Entities::EnumInfo?
+    @enums.find { |enum_info| enum_name == enum_info.name }
+  end
+
+  def add_annotation(annotation_info : Cruml::Entities::AnnotationInfo) : Nil
+    return if find_annotation(annotation_info.name)
+    @annotations << annotation_info
+  end
+
+  def find_annotation(annotation_name : String) : Cruml::Entities::AnnotationInfo?
+    @annotations.find { |annotation_info| annotation_name == annotation_info.name }
+  end
+
+  def add_alias(alias_info : Cruml::Entities::AliasInfo) : Nil
+    return if find_alias(alias_info.name)
+    @aliases << alias_info
+  end
+
+  def find_alias(alias_name : String) : Cruml::Entities::AliasInfo?
+    @aliases.find { |alias_info| alias_name == alias_info.name }
+  end
+
+  # Returns true if a type of any kind is registered under this name.
+  def includes?(name : String) : Bool
+    entity_names.includes?(name)
+  end
+
   def clear : Nil
     @classes.clear
     @modules.clear
+    @enums.clear
+    @annotations.clear
+    @aliases.clear
   end
 
-  def group_classes_by_namespaces(test_mode : Bool = false) : Hash(String, Array(Cruml::Entities::ClassInfo))
-    output = {} of String => Array(Cruml::Entities::ClassInfo)
+  # Rewrites the superclass, mixin and alias references, as written in the source, into the
+  # fully qualified names of the registered types. Must run once every file has been parsed,
+  # since a reference can point to a type declared in another file.
+  def resolve_references : Nil
+    names_by_base = {} of String => String
+    entity_names.each { |name| names_by_base[self.class.strip_generics(name)] ||= name }
 
-    config_path = if test_mode
-                    Dir.current + "/.cruml.test.yml"
-                  else
-                    Dir.current + "/.cruml.yml"
-                  end
-
-    unless File.exists?(config_path)
-      return output
-    end
-
-    File.open(config_path) do |file|
-      if namespaces = YAML.parse(file)["namespaces"]?
-        namespaces.as_h.each do |key, classes|
-          classes_info = [] of Cruml::Entities::ClassInfo
-
-          classes.as_a.each do |klass|
-            if found_class = find_class(klass.as_s)
-              classes_info << found_class
-              @classes.reject! { |kls| kls.name == klass.as_s }
-            end
-          end
-
-          unless classes_info.empty?
-            output[key.as_s] = classes_info
-          end
-        end
+    @classes.each do |klass|
+      if superclass = klass.superclass
+        klass.superclass = resolve(superclass, self.class.parent_scope(klass.name), names_by_base)
       end
+      klass.resolve_modules { |mod| resolve(mod, klass.name, names_by_base) }
     end
 
-    output
+    @modules.each { |mod| mod.resolve_modules { |name| resolve(name, mod.name, names_by_base) } }
+    @enums.each { |enum_info| enum_info.resolve_modules { |name| resolve(name, enum_info.name, names_by_base) } }
+
+    @aliases.each do |alias_info|
+      alias_info.target = resolve(alias_info.target, self.class.parent_scope(alias_info.name), names_by_base)
+    end
   end
 
-  def group_modules_by_namespaces(test_mode : Bool = false) : Hash(String, Array(Cruml::Entities::ModuleInfo))
-    output = {} of String => Array(Cruml::Entities::ModuleInfo)
-
-    config_path = if test_mode
-                    Dir.current + "/.cruml.test.yml"
-                  else
-                    Dir.current + "/.cruml.yml"
-                  end
-
-    unless File.exists?(config_path)
-      return output
-    end
-
-    File.open(config_path) do |file|
-      if namespaces = YAML.parse(file)["namespaces"]?
-        namespaces.as_h.each do |key, items|
-          modules_info = [] of Cruml::Entities::ModuleInfo
-
-          items.as_a.each do |item|
-            if found_module = find_module(item.as_s)
-              modules_info << found_module
-              @modules.reject! { |mod| mod.name == item.as_s }
-            end
-          end
-
-          output[key.as_s] = modules_info unless modules_info.empty?
-        end
-      end
-    end
-
-    output
-  end
-
+  # Removes from each class the instance variables already declared by one of its ancestors.
   def remove_duplicate_instance_vars : Nil
-    classes_with_parents = @classes.select { |klass| !klass.parent_classes.empty? }
-      .sort_by!(&.parent_classes.size)
+    @classes.each do |klass|
+      visited = Set{klass.name}
+      parent = klass.superclass.try { |name| find_class(name) }
 
-    classes_with_parents.reverse_each do |klass|
-      klass.parent_classes.each do |parent_name, _, _|
-        if parent = find_class(parent_name)
-          parent_ivars = parent.instance_vars
-          klass.instance_vars.reject! { |ivar| parent_ivars.includes?(ivar) }
+      while parent && visited.add?(parent.name)
+        parent_ivars = parent.instance_vars
+        klass.instance_vars.reject! { |ivar| parent_ivars.includes?(ivar) }
+        parent = parent.superclass.try { |name| find_class(name) }
+      end
+    end
+  end
+
+  # Removes the generic type parameters from a type name (`A(T)::B(K, V)` becomes `A::B`).
+  def self.strip_generics(name : String) : String
+    depth = 0
+
+    String.build do |io|
+      name.each_char do |char|
+        case char
+        when '(' then depth += 1
+        when ')' then depth -= 1
+        else          io << char if depth == 0
         end
       end
     end
+  end
+
+  # Returns the namespace enclosing a type (`A::B(T)` gives `A`).
+  def self.parent_scope(name : String) : String
+    parts = strip_generics(name).split("::")
+    parts[0...-1].join("::")
+  end
+
+  private def entity_names : Array(String)
+    @classes.map(&.name) + @modules.map(&.name) + @enums.map(&.name) +
+      @annotations.map(&.name) + @aliases.map(&.name)
+  end
+
+  # Looks the reference up from the innermost enclosing namespace outwards, like Crystal does
+  # for constants, and falls back to the reference as written for types outside the project.
+  private def resolve(reference : String, scope : String, names_by_base : Hash(String, String)) : String
+    return reference.lchop("::") if reference.starts_with?("::")
+
+    base = self.class.strip_generics(reference)
+    scope_parts = self.class.strip_generics(scope).split("::").reject(&.empty?)
+
+    scope_parts.size.downto(0) do |size|
+      candidate = (scope_parts[0, size] + [base]).join("::")
+      if name = names_by_base[candidate]?
+        return name
+      end
+    end
+
+    reference
   end
 end
-

@@ -1,92 +1,59 @@
 require "../spec_helper"
-require "compiler/crystal/syntax"
-require "../../src/parsers/class_parser"
 
 describe Cruml::Parsers::ClassParser do
   it "identifies interface by name" do
-    code = "class MyInterface; end"
-    ast = Crystal::Parser.parse(code)
-    node = ast.as(Crystal::ClassDef)
+    node = Crystal::Parser.parse("class MyInterface; end").as(Crystal::ClassDef)
 
     class_type = Cruml::Parsers::ClassParser.determine_class_type("MyInterface", node)
     class_type.should eq(:interface)
   end
 
   it "identifies abstract class" do
-    code = "abstract class MyClass; end"
-    ast = Crystal::Parser.parse(code)
-    node = ast.as(Crystal::ClassDef)
+    node = Crystal::Parser.parse("abstract class MyClass; end").as(Crystal::ClassDef)
 
     class_type = Cruml::Parsers::ClassParser.determine_class_type("MyClass", node)
     class_type.should eq(:abstract)
   end
 
   it "identifies normal class" do
-    code = "class MyClass; end"
-    ast = Crystal::Parser.parse(code)
-    node = ast.as(Crystal::ClassDef)
+    node = Crystal::Parser.parse("class MyClass; end").as(Crystal::ClassDef)
 
     class_type = Cruml::Parsers::ClassParser.determine_class_type("MyClass", node)
     class_type.should eq(:class)
   end
 
   it "extracts generic type parameters" do
-    code = "class Container(T); end"
-    ast = Crystal::Parser.parse(code)
-    node = ast.as(Crystal::ClassDef)
+    node = Crystal::Parser.parse("class Container(T); end").as(Crystal::ClassDef)
 
     generics = Cruml::Parsers::ClassParser.extract_generics(node)
     generics.should eq("(T)")
   end
 
   it "extracts multiple generic parameters" do
-    code = "class Pair(K, V); end"
-    ast = Crystal::Parser.parse(code)
-    node = ast.as(Crystal::ClassDef)
+    node = Crystal::Parser.parse("class Pair(K, V); end").as(Crystal::ClassDef)
 
     generics = Cruml::Parsers::ClassParser.extract_generics(node)
     generics.should eq("(K, V)")
   end
 
   it "returns nil for non-generic class" do
-    code = "class MyClass; end"
-    ast = Crystal::Parser.parse(code)
-    node = ast.as(Crystal::ClassDef)
+    node = Crystal::Parser.parse("class MyClass; end").as(Crystal::ClassDef)
 
     generics = Cruml::Parsers::ClassParser.extract_generics(node)
     generics.should be_nil
   end
 
-  it "parses single include statement" do
-    body = "include MyModule"
+  it "returns the name of a referenced type" do
+    include_node = Crystal::Parser.parse("include MyNamespace::MyModule").as(Crystal::Include)
+    Cruml::Parsers::ClassParser.reference_name(include_node.name).should eq("MyNamespace::MyModule")
 
-    includes = Cruml::Parsers::ClassParser.parse_includes(body)
-    includes.should eq(["MyModule"])
+    generic_node = Crystal::Parser.parse("include Comparable(Point)").as(Crystal::Include)
+    Cruml::Parsers::ClassParser.reference_name(generic_node.name).should eq("Comparable(Point)")
   end
 
-  it "parses multiple include statements" do
-    body = <<-BODY
-      include ModuleA
-      include ModuleB
-      include ModuleC
-      BODY
-
-    includes = Cruml::Parsers::ClassParser.parse_includes(body)
-    includes.should eq(["ModuleA", "ModuleB", "ModuleC"])
-  end
-
-  it "parses namespaced includes" do
-    body = "include MyNamespace::MyModule"
-
-    includes = Cruml::Parsers::ClassParser.parse_includes(body)
-    includes.should eq(["MyNamespace::MyModule"])
-  end
-
-  it "returns empty array when no includes" do
-    body = "property name : String"
-
-    includes = Cruml::Parsers::ClassParser.parse_includes(body)
-    includes.should be_empty
+  it "returns nil for `extend self`" do
+    node = Crystal::Parser.parse("extend self").as(Crystal::Extend)
+    Cruml::Parsers::ClassParser.reference_name(node.name).should be_nil
   end
 
   it "returns true for interface names" do

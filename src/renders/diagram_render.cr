@@ -1,5 +1,5 @@
-require "ecr"
 require "file_utils"
+require "./config"
 require "./uml"
 
 # Consists of generating a class diagram (see https://d2lang.com/tour/uml-classes)
@@ -8,13 +8,18 @@ class Cruml::Renders::DiagramRender
 
   getter code = String::Builder.new
 
-  def initialize(@path_dir : String, @registry : Cruml::Services::RegistryService); end
+  # Path of each type in the diagram, used as edge endpoints.
+  @paths = {} of String => String
+
+  def initialize(@path_dir : String, @registry : Cruml::Services::RegistryService,
+                 @namespaces : Hash(String, Array(String)) = Cruml::Renders::Config.file.namespaces); end
 
   # Generates the UML class diagram.
   def generate : Nil
-    generate_diagrams_by_namespace
-    generate_standalone_modules
-    generate_standalone_classes
+    # Children are drawn below their parents, as arrows point from child to parent.
+    @code << "direction: up\n"
+    generate_types
+    generate_relations
   end
 
   # Saves the class diagram as a `.d2` file.

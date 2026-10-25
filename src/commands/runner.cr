@@ -3,7 +3,7 @@ require "tallboy"
 require "process"
 require "time"
 
-require "./../transformer"
+require "./../visitor"
 require "./../services/registry_service"
 require "./../renders/diagram_render"
 
@@ -17,19 +17,22 @@ class Cruml::Runner
       exit 1
     end
 
-    processed_files = 0 if @verbose
+    processed_files = 0
     registry = Cruml::Services::RegistryService.new
 
     measured_time_to_process = Time.measure do
-      @files.each do |file|
-        ast = Crystal::Parser.parse(File.read(file))
-        tx = Cruml::Transformer.new(registry)
-        ast.transform(tx)
+      visitor = Cruml::Visitor.new(registry)
 
-        if @verbose && processed_files
+      @files.each do |file|
+        begin
+          Crystal::Parser.parse(File.read(file)).accept(visitor)
           processed_files += 1
+        rescue error : Crystal::SyntaxException
+          STDERR.puts "Skipping #{file} : #{error.message} (line #{error.line_number})".colorize(:yellow)
         end
       end
+
+      registry.resolve_references
     end
 
     measured_time_to_verify = Time.measure do
@@ -43,17 +46,7 @@ class Cruml::Runner
       diagram.generate
       diagram.save
 
-      begin
-        process = Process.run("d2", ["#{@output_dir}/diagram.d2", "#{@output_dir}/diagram.svg", "-c"])
-
-        if process.exit_code != 0
-          puts "Cannot render the class diagram with d2; maybe because of the syntax error."
-          exit 1
-        end
-      rescue File::NotFoundError
-        puts "d2 is not installed. Please go to https://github.com/terrastruct/d2 to install it."
-        exit 1
-      end
+      render_svg("#{@output_dir}/diagram.d2", "#{@output_dir}/diagram.svg")
     end
 
     if @verbose
@@ -77,5 +70,20 @@ class Cruml::Runner
         puts "Diagram successfully generated in #{total_time.total_milliseconds.round(2)} milliseconds.".colorize(:green)
       end
     end
+  end
+
+  # Renders the d2 file as SVG, showing the errors reported by d2 if it fails.
+  private def render_svg(d2_path : String, svg_path : String) : Nil
+    error = IO::Memory.new
+    status = Process.run("d2", [d2_path, svg_path, "-c"], error: error)
+
+    unless status.success?
+      STDERR.puts "Cannot render the class diagram with d2 (exit code #{status.exit_code}):".colorize(:red)
+      STDERR.puts error.to_s.strip unless error.empty?
+      exit 1
+    end
+  rescue File::NotFoundError
+    STDERR.puts "d2 is not installed. Please go to https://github.com/terrastruct/d2 to install it.".colorize(:red)
+    exit 1
   end
 end

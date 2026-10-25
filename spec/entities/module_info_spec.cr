@@ -1,4 +1,4 @@
-require "spec"
+require "../spec_helper"
 
 describe Cruml::Entities::ModuleInfo do
   it "initializes with a name" do
@@ -22,6 +22,7 @@ describe Cruml::Entities::ModuleInfo do
   it "adds an instance variable to the instance_vars array" do
     module_info = Cruml::Entities::ModuleInfo.new("TestModule")
     module_info.add_instance_var("var_name", "String")
+    module_info.instance_vars.should eq([{"var_name", "String"}])
   end
 
   it "replaces an existing instance variable with the same name" do

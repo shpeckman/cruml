@@ -1,11 +1,15 @@
 # src/renders/config.cr
 
 require "yaml"
+require "./config_file"
 
 class Cruml::Renders::Config
   class_property theme = :light
   class_property? no_color = false
   class_property? verbose = false
+
+  # Loaded configuration file (see `.load`).
+  class_property file = Cruml::Renders::ConfigFile.new
 
   def self.config_path : String
     File.join(Dir.current, ".cruml.yml")
@@ -26,6 +30,14 @@ class Cruml::Renders::Config
             yml.scalar "#e2c7a3"
             yml.scalar "modules"
             yml.scalar "#5ab3f4"
+            yml.scalar "structs"
+            yml.scalar "#e5a7c9"
+            yml.scalar "enums"
+            yml.scalar "#a7e0e5"
+            yml.scalar "annotations"
+            yml.scalar "#e5e0a7"
+            yml.scalar "aliases"
+            yml.scalar "#d4d4d4"
           end
 
           yml.scalar "dark"
@@ -38,6 +50,14 @@ class Cruml::Renders::Config
             yml.scalar "#af6300"
             yml.scalar "modules"
             yml.scalar "#0041cc"
+            yml.scalar "structs"
+            yml.scalar "#6b1a45"
+            yml.scalar "enums"
+            yml.scalar "#0f5a54"
+            yml.scalar "annotations"
+            yml.scalar "#5c5410"
+            yml.scalar "aliases"
+            yml.scalar "#4a4a4a"
           end
         end
 
@@ -68,86 +88,48 @@ class Cruml::Renders::Config
     path
   end
 
-  def self.class_color : String
-    customized_color = color_theme_from_yaml("classes")
+  # Parses the configuration file once; raises `YAML::ParseException` if it is invalid.
+  def self.load(path : String = config_path) : Cruml::Renders::ConfigFile
+    @@file = Cruml::Renders::ConfigFile.load(path)
+  end
 
-    if !customized_color.nil?
-      customized_color
-    else
-      (@@theme == :light) ? "#5016bb" : "#2e1065"
-    end
+  def self.class_color : String
+    theme_colors.try(&.classes) || themed("#5016bb", "#2e1065")
   end
 
   def self.abstract_color : String
-    customized_color = color_theme_from_yaml("abstract_classes")
-
-    if !customized_color.nil?
-      customized_color
-    else
-      (@@theme == :light) ? "#5ea012" : "#365314"
-    end
+    theme_colors.try(&.abstract_classes) || themed("#5ea012", "#365314")
   end
 
   def self.interface_color : String
-    customized_color = color_theme_from_yaml("interfaces")
-
-    if !customized_color.nil?
-      customized_color
-    else
-      (@@theme == :light) ? "#e28b19" : "#af6300"
-    end
+    theme_colors.try(&.interfaces) || themed("#e28b19", "#af6300")
   end
 
   def self.module_color : String
-    customized_color = color_theme_from_yaml("modules")
-
-    if !customized_color.nil?
-      customized_color
-    else
-      (@@theme == :light) ? "#1158f3" : "#0041cc"
-    end
+    theme_colors.try(&.modules) || themed("#1158f3", "#0041cc")
   end
 
-  def self.theme_color : String
-    (@@theme == :light) ? "#dedede" : "#212121"
+  def self.struct_color : String
+    theme_colors.try(&.structs) || themed("#e5a7c9", "#6b1a45")
   end
 
-  def self.text_color : String
-    (@@theme == :light) ? "#000000" : "#ffffff"
+  def self.enum_color : String
+    theme_colors.try(&.enums) || themed("#a7e0e5", "#0f5a54")
   end
 
-  def self.color_theme_from_yaml(type : String) : String?
-    path = ensure_config_file!
-
-    File.open(path) do |file|
-      if colors = YAML.parse(file)["colors"]?
-        if theme_colors = colors[@@theme.to_s]?
-          if color = theme_colors[type]?
-            return color.as_s
-          end
-        end
-      end
-    end
-
-    nil
+  def self.annotation_color : String
+    theme_colors.try(&.annotations) || themed("#e5e0a7", "#5c5410")
   end
 
-  def self.class_def_colors : String
-    String.build do |io|
-      [
-        {:default, self.class_color},
-        {:abstract, self.abstract_color},
-        {:interface, self.interface_color},
-        {:module, self.module_color},
-      ].each do |type, color|
-        io << Cruml::Renders::UML::INDENT * 2
-        io << "classDef " << type << " fill:"
-        io << (@@no_color == true ? self.theme_color : color)
-        io << ",color:" << self.text_color
-        io << ",stroke:" << (@@theme == :dark ? "#fff" : "#000")
-        io << "\n"
-      end
-    end
+  def self.alias_color : String
+    theme_colors.try(&.aliases) || themed("#d4d4d4", "#4a4a4a")
+  end
+
+  private def self.theme_colors : Cruml::Renders::ConfigFile::ThemeColors?
+    @@file.theme_colors(@@theme)
+  end
+
+  private def self.themed(light : String, dark : String) : String
+    @@theme == :light ? light : dark
   end
 end
-

@@ -1,95 +1,73 @@
 require "../spec_helper"
-require "../../src/parsers/variable_parser"
+
+private def accessors(code : String)
+  Cruml::Parsers::VariableParser.parse_accessors(Crystal::Parser.parse(code).as(Crystal::Call))
+end
+
+private def infer(code : String)
+  Cruml::Parsers::VariableParser.infer_type(Crystal::Parser.parse(code))
+end
 
 describe Cruml::Parsers::VariableParser do
-  it "parses property attribute" do
-    result = Cruml::Parsers::VariableParser.parse_instance_attribute("property(name : String)")
+  it "parses a typed property" do
+    result = accessors("property name : String").not_nil!
 
-    result.should_not be_nil
-    result.try do |real_result|
-      real_result[:visibility].should eq("property")
-      real_result[:name].should eq("name")
-      real_result[:type].should eq("String")
-    end
+    result.size.should eq(1)
+    result[0].name.should eq("name")
+    result[0].type.should eq("String")
+    result[0].var_name.should eq("@name")
+    result[0].getter?.should be_true
+    result[0].setter?.should be_true
   end
 
-  it "parses getter attribute" do
-    result = Cruml::Parsers::VariableParser.parse_instance_attribute("getter(age : Int32)")
+  it "parses several getters in one call" do
+    result = accessors("getter x : Int32, y : Int32").not_nil!
 
-    result.should_not be_nil
-    result.try do |real_result|
-      real_result[:visibility].should eq("getter")
-      real_result[:name].should eq("age")
-      real_result[:type].should eq("Int32")
-    end
+    result.map(&.name).should eq(["x", "y"])
+    result.map(&.setter?).should eq([false, false])
   end
 
-  it "returns nil for invalid format" do
-    result = Cruml::Parsers::VariableParser.parse_instance_attribute("invalid")
-    result.should be_nil
+  it "infers the type from the default value" do
+    result = accessors("getter? alive = true").not_nil!
+
+    result[0].type.should eq("Bool")
+    result[0].predicate?.should be_true
   end
 
-  it "parses class_property attribute" do
-    result = Cruml::Parsers::VariableParser.parse_class_attribute("class_property(config : Config)")
+  it "keeps untyped accessors without a type" do
+    result = accessors("setter name").not_nil!
 
-    result.should_not be_nil
-    result.try do |real_result|
-      real_result[:visibility].should eq("class_property")
-      real_result[:name].should eq("config")
-      real_result[:type].should eq("Config")
-    end
+    result[0].type.should be_nil
+    result[0].getter?.should be_false
   end
 
-  it "parses class_getter attribute" do
-    result = Cruml::Parsers::VariableParser.parse_class_attribute("class_getter(instance : Instance)")
+  it "makes the variable of a `getter!` nilable" do
+    result = accessors("getter! area : Float64").not_nil!
 
-    result.should_not be_nil
-    result.try do |real_result|
-      real_result[:visibility].should eq("class_getter")
-      real_result[:name].should eq("instance")
-      real_result[:type].should eq("Instance")
-    end
+    result[0].nilable?.should be_true
+    result[0].var_type.should eq("Float64?")
   end
 
-  it "parses instance variable declaration" do
-    result = Cruml::Parsers::VariableParser.parse_instance_var_declaration("@name : String")
+  it "parses class-level accessors" do
+    result = accessors("class_getter count : Int32").not_nil!
 
-    result.should_not be_nil
-    result.try do |real_result|
-      real_result[:name].should eq("name")
-      real_result[:type].should eq("String")
-    end
+    result[0].class_level.should be_true
+    result[0].var_name.should eq("@@count")
   end
 
-  it "parses complex type declarations" do
-    result = Cruml::Parsers::VariableParser.parse_instance_var_declaration("@items : Array(String)")
-
-    result.should_not be_nil
-    result.try do |real_result|
-      real_result[:name].should eq("items")
-      real_result[:type].should eq("Array(String)")
-    end
+  it "returns nil for other calls" do
+    accessors("puts name").should be_nil
+    accessors("foo.getter name : String").should be_nil
   end
 
-  it "parses instance variable assignment" do
-    result = Cruml::Parsers::VariableParser.parse_instance_var_assignment("@name = name", "name")
-
-    result.should eq("name")
-  end
-
-  it "returns nil when argument doesn't match" do
-    result = Cruml::Parsers::VariableParser.parse_instance_var_assignment("@name = other", "name")
-
-    result.should be_nil
-  end
-
-  it "returns true when names match" do
-    result = Cruml::Parsers::VariableParser.matches_instance_var?("@name", "name")
-    result.should be_true
-  end
-
-  it "returns false when names don't match" do
-    result = Cruml::Parsers::VariableParser.matches_instance_var?("@email", "name")
-    result.should be_false
+  it "infers literal types" do
+    infer(%("text")).should eq("String")
+    infer("1").should eq("Int32")
+    infer("1_u8").should eq("UInt8")
+    infer("1.5").should eq("Float64")
+    infer("[] of String").should eq("Array(String)")
+    infer("{} of String => Int32").should eq("Hash(String, Int32)")
+    infer("Foo::Bar.new(1)").should eq("Foo::Bar")
+    infer("compute").should be_nil
   end
 end
