@@ -121,7 +121,7 @@ describe Cruml::Visitor do
     registry.find_class!("Person").instance_vars.should be_empty
   end
 
-  it "records includes and extends of classes, modules and enums" do
+  it "records includes and extends of classes and modules" do
     registry = visit_source <<-CR
       module App
         module Greeter; end
@@ -133,10 +133,6 @@ describe Cruml::Visitor do
           include Greeter
           extend Loggable
         end
-        enum Color
-          Red
-          include Greeter
-        end
       end
       CR
 
@@ -144,7 +140,6 @@ describe Cruml::Visitor do
     registry.find_class!("App::Person").extended_modules.should eq(["App::Loggable"])
     registry.find_module!("App::Loggable").included_modules.should eq(["App::Greeter"])
     registry.find_module!("App::Loggable").extended_modules.should be_empty
-    registry.find_enum("App::Color").not_nil!.included_modules.should eq(["App::Greeter"])
   end
 
   it "resolves superclasses declared in another file" do

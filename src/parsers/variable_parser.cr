@@ -1,4 +1,5 @@
 require "compiler/crystal/syntax"
+require "./method_parser"
 
 # Parses variable declarations from the Crystal AST.
 module Cruml::Parsers::VariableParser
@@ -49,7 +50,7 @@ module Cruml::Parsers::VariableParser
 
     call.args.compact_map do |arg|
       name, type = case arg
-                   when Crystal::TypeDeclaration then {arg.var.to_s, arg.declared_type.to_s}
+                   when Crystal::TypeDeclaration then {arg.var.to_s, Cruml::Parsers::MethodParser.type_name(arg.declared_type)}
                    when Crystal::Assign          then {arg.target.to_s, infer_type(arg.value)}
                    when Crystal::Var, Crystal::Call
                      {arg.name, nil}

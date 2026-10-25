@@ -132,8 +132,8 @@ class Cruml::Visitor < Crystal::Visitor
     return false unless owner = @owner
 
     case var = node.var
-    when Crystal::InstanceVar then owner.add_instance_var(var.name, node.declared_type.to_s)
-    when Crystal::ClassVar    then owner.add_class_var(var.name, node.declared_type.to_s)
+    when Crystal::InstanceVar then owner.add_instance_var(var.name, Cruml::Parsers::MethodParser.type_name(node.declared_type))
+    when Crystal::ClassVar    then owner.add_class_var(var.name, Cruml::Parsers::MethodParser.type_name(node.declared_type))
     end
 
     false
@@ -238,7 +238,7 @@ class Cruml::Visitor < Crystal::Visitor
   private def assigned_type(value : Crystal::ASTNode, current_def : Crystal::Def) : String?
     if value.is_a?(Crystal::Var) && (arg = current_def.args.find { |def_arg| def_arg.name == value.name })
       if restriction = arg.restriction
-        return restriction.to_s
+        return Cruml::Parsers::MethodParser.type_name(restriction)
       end
 
       return arg.default_value.try { |default_value| Cruml::Parsers::VariableParser.infer_type(default_value) }
