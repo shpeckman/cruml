@@ -54,4 +54,3 @@ module Cruml::Parsers::MethodParser
     node.to_s.gsub(" ::", ' ')
   end
 end
-
