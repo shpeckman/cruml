@@ -36,8 +36,8 @@ module Cruml::Renders::Classifier
   end
 
   # Adds a struct into the class diagram.
-  private def add_struct(name : String, abstract : Bool = false, &) : Nil
-    add_object(name, Cruml::Renders::Config.struct_color, abstract ? "abstract struct" : "struct") do
+  private def add_struct(name : String, abstract is_abstract : Bool = false, &) : Nil
+    add_object(name, Cruml::Renders::Config.struct_color, is_abstract ? "abstract struct" : "struct") do
       yield
     end
   end
